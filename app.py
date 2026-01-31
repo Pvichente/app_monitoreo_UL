@@ -71,7 +71,7 @@ if 'start_session_time' not in st.session_state: st.session_state.start_session_
 @st.fragment(run_every=20)
 def keep_alive():
     # Mantiene el WebSocket activo
-    st.sidebar.caption(f"🟢 En línea: {datetime.datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"🟢 En línea: {datetime.datetime.now().strftime('%H:%M:%S')}")
 
 # Activamos el latido en toda la app
 with st.sidebar:
