@@ -3,7 +3,6 @@ import pandas as pd
 import datetime
 import time
 import os
-import unicodedata
 
 # --- 1. CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
@@ -24,49 +23,23 @@ st.markdown("""
 # --- 3. CONEXIÓN A GOOGLE SHEETS ---
 SHEET_ID = "17XScIYv_FzsYApoF30p6PPZm6moUqH6WLzD33cetPbs"
 
-def _strip_accents(s: str) -> str:
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", s)
-        if not unicodedata.combining(c)
-    )
-
-def _norm_header(s: str) -> str:
-    s = str(s).replace("\ufeff", "").strip()
-    s = _strip_accents(s).lower()
-    s = " ".join(s.split())
-    return s
-
-def _norm_value(s) -> str:
-    s = "" if s is None else str(s)
-    s = s.replace("\ufeff", "").replace("\xa0", " ").strip()
-    s = " ".join(s.split())
-    # Si viene como "130391.0", lo convertimos a "130391"
-    if s.endswith(".0") and s[:-2].isdigit():
-        s = s[:-2]
-    return s
-
-def _find_col(df: pd.DataFrame, targets: set[str]):
-    for c in df.columns:
-        if _norm_header(c) in targets:
-            return c
-    return None
-
-@st.cache_data(ttl=300, show_spinner=False)
 def load_google_sheet(sheet_name: str) -> pd.DataFrame:
-    # IMPORTANTE: esta es la URL correcta (NO uses /edit?...):
+    """
+    Carga directa de Google Sheets como CSV usando gviz.
+    SIN cache, para que las contraseñas nuevas se tomen siempre.
+    """
     url = (
         f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
         f"?tqx=out:csv&sheet={sheet_name.replace(' ', '%20')}"
     )
     try:
-        df = pd.read_csv(url, dtype=str, keep_default_na=False)  # clave para no romper contraseñas numéricas
-        df.columns = [c.replace("\ufeff", "").strip() for c in df.columns]
+        df = pd.read_csv(url)
         return df
     except Exception as e:
-        st.error(f"Error de conexión: {e}")
+        st.error(f"Error de conexión con Google Sheets: {e}")
         return pd.DataFrame()
 
-# --- 4. GESTIÓN DE MEMORIA Y RECUPERACIÓN (EL BLINDAJE) ---
+# --- 4. GESTIÓN DE MEMORIA Y RECUPERACIÓN (BLINDAJE TALK-TIME) ---
 def _get_qp_value(params, key, default=None):
     if key not in params:
         return default
@@ -108,7 +81,7 @@ if "init_done" not in st.session_state:
     restore_from_url()
     st.session_state.init_done = True
 
-base_defaults = {
+defaults = {
     "logged_in": False,
     "user_name": "",
     "monitoring_active": False,
@@ -118,11 +91,10 @@ base_defaults = {
     "start_session_time": None,
     "context": {},
 }
-for k, v in base_defaults.items():
+for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# Defaults de inputs (evita reinicios raros)
 input_defaults = {
     "asistencia_total": 0,
     "llegaron_antes_10": 0,
@@ -163,7 +135,7 @@ def live_clock_component():
     percentage = max(0, min(percentage, 999))
     st.metric("Acumulado (En vivo)", timer_str, f"{percentage}% (de 90m)")
 
-# --- 7. GUARDADO LOCAL ROBUSTO ---
+# --- 7. GUARDADO LOCAL ---
 def save_observation_locally(data_dict):
     file_path = "observaciones_consolidado.csv"
     new_row = pd.DataFrame([data_dict])
@@ -186,42 +158,33 @@ def login_screen():
     with col2:
         st.title("🛡️ Monitor Blindado")
 
-        # Forzar recarga (por cache)
-        if st.button("🔄 Actualizar usuarios/contraseñas"):
-            st.cache_data.clear()
-            st.rerun()
-
         with st.spinner("Conectando..."):
             df_users = load_google_sheet("Course Managers")
 
         if df_users.empty:
-            st.error("No se pudo cargar la hoja 'Course Managers'. Revisa permisos/compartición.")
+            st.error("No se pudo cargar la hoja 'Course Managers'.")
             return
 
-        nombre_col = _find_col(df_users, {"nombre"})
-        pass_col = _find_col(df_users, {"contrasena", "contraseña", "password"})
-
-        if not nombre_col or not pass_col:
-            st.error(f"No encuentro columnas de login. Columnas detectadas: {list(df_users.columns)}")
+        # Aquí asumo que las columnas se llaman exactamente 'Nombre' y 'Contraseña'
+        if "Nombre" not in df_users.columns or "Contraseña" not in df_users.columns:
+            st.error(f"No encuentro las columnas 'Nombre' y 'Contraseña'. Columnas detectadas: {list(df_users.columns)}")
             return
 
-        df_users["_nombre_norm"] = df_users[nombre_col].apply(_norm_value)
-        df_users["_pass_norm"] = df_users[pass_col].apply(_norm_value)
-
-        lista_nombres = sorted([n for n in df_users["_nombre_norm"].unique().tolist() if n != ""])
+        lista_nombres = df_users["Nombre"].dropna().unique().tolist()
         selected_user = st.selectbox("Usuario", lista_nombres, key="login_user")
         password = st.text_input("Contraseña", type="password", key="login_pass")
 
         if st.button("INGRESAR", type="primary"):
-            pw_in = _norm_value(password)
-
-            match = df_users[df_users["_nombre_norm"] == _norm_value(selected_user)]
-            if match.empty:
-                st.error("Usuario no encontrado.")
+            try:
+                user_row = df_users[df_users["Nombre"] == selected_user].iloc[0]
+            except IndexError:
+                st.error("Usuario no encontrado en la tabla.")
                 return
 
-            pw_sheet = match.iloc[0]["_pass_norm"]
-            if pw_in == pw_sheet:
+            pwd_sheet = str(user_row["Contraseña"]).strip()
+            pwd_in = password.strip()
+
+            if pwd_in == pwd_sheet:
                 st.session_state.logged_in = True
                 st.session_state.user_name = selected_user
                 st.rerun()
@@ -236,7 +199,6 @@ def context_screen():
     if df.empty:
         st.stop()
 
-    # Si tus headers cambian, ajusta aquí (por ahora asumo que existen tal cual)
     required = {"Trimestre", "Curso", "Grupo", "Facilitador"}
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -245,7 +207,11 @@ def context_screen():
 
     col1, col2 = st.columns(2)
     with col1:
-        trimestre = st.selectbox("Trimestre", sorted(df["Trimestre"].astype(str).unique()), key="ctx_trimestre")
+        trimestre = st.selectbox(
+            "Trimestre",
+            sorted(df["Trimestre"].astype(str).unique()),
+            key="ctx_trimestre"
+        )
         df_t = df[df["Trimestre"].astype(str) == str(trimestre)]
         curso = st.selectbox("Curso", sorted(df_t["Curso"].unique()), key="ctx_curso")
 
@@ -254,7 +220,7 @@ def context_screen():
         grupo = st.selectbox("Grupo", sorted(df_c["Grupo"].unique()), key="ctx_grupo")
         try:
             facilitador_nombre = df_c[df_c["Grupo"] == grupo].iloc[0]["Facilitador"]
-        except:
+        except IndexError:
             facilitador_nombre = "No asignado"
         st.text_input("Facilitador", value=facilitador_nombre, disabled=True)
         sesion = st.selectbox("Sesión", range(1, 21), key="ctx_sesion")
@@ -333,18 +299,51 @@ def monitoring_dashboard():
         st.markdown("#### 2. Variables")
         col_vars1, col_vars2 = st.columns(2)
 
-        # Keys fijas + max_value estable para evitar reinicios/bloqueos
         with col_vars2:
-            st.number_input("Asistencia Total", min_value=0, max_value=100, step=1, key="asistencia_total")
-            st.number_input("¿Cuántos estudiantes llegaron antes de los 10 minutos?", min_value=0, max_value=100, step=1, key="llegaron_antes_10")
-            st.number_input("¿Cuántos estudiantes llegaron después de los 10 minutos?", min_value=0, max_value=100, step=1, key="llegaron_despues_10")
+            st.number_input(
+                "Asistencia Total",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="asistencia_total"
+            )
+            st.number_input(
+                "¿Cuántos estudiantes llegaron antes de los 10 minutos?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="llegaron_antes_10"
+            )
+            st.number_input(
+                "¿Cuántos estudiantes llegaron después de los 10 minutos?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="llegaron_despues_10"
+            )
 
         with col_vars1:
-            st.radio("¿Puntual?", ["Sí", "No"], horizontal=True, key="inicio_puntual")
-            st.radio("¿Hubo Pre-work?", ["Sí", "No"], horizontal=True, key="hubo_prework")
+            st.radio(
+                "¿Puntual?",
+                ["Sí", "No"],
+                horizontal=True,
+                key="inicio_puntual"
+            )
+            st.radio(
+                "¿Hubo Pre-work?",
+                ["Sí", "No"],
+                horizontal=True,
+                key="hubo_prework"
+            )
 
             if st.session_state.get("hubo_prework", "No") == "Sí":
-                st.number_input("¿Cuántos estudiantes hicieron Pre-work?", min_value=0, max_value=100, step=1, key="prework_count")
+                st.number_input(
+                    "¿Cuántos estudiantes hicieron Pre-work?",
+                    min_value=0,
+                    max_value=100,
+                    step=1,
+                    key="prework_count"
+                )
             else:
                 st.session_state["prework_count"] = 0
 
@@ -357,20 +356,53 @@ def monitoring_dashboard():
         col_p1, col_p2 = st.columns(2)
 
         with col_p1:
-            st.number_input("¿Cuántos estudiantes participaron por solicitud del facilitador?", min_value=0, max_value=100, step=1, key="particip_facilitador")
-            st.number_input("¿Cuántos estudiantes participaron por voluntad propia?", min_value=0, max_value=100, step=1, key="particip_voluntaria")
+            st.number_input(
+                "¿Cuántos estudiantes participaron por solicitud del facilitador?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="particip_facilitador"
+            )
+            st.number_input(
+                "¿Cuántos estudiantes participaron por voluntad propia?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="particip_voluntaria"
+            )
 
-            st.radio("¿Hubo algún incidente problemático con algún estudiante?", ["Sí", "No"], horizontal=True, key="incidente_problematico")
+            st.radio(
+                "¿Hubo algún incidente problemático con algún estudiante?",
+                ["Sí", "No"],
+                horizontal=True,
+                key="incidente_problematico"
+            )
             if st.session_state.get("incidente_problematico", "No") == "Sí":
-                st.text_input("¿Qué estudiante fue?", key="incidente_estudiante", placeholder="Nombre del estudiante")
+                st.text_input(
+                    "¿Qué estudiante fue?",
+                    key="incidente_estudiante",
+                    placeholder="Nombre del estudiante"
+                )
             else:
                 st.session_state["incidente_estudiante"] = ""
 
         with col_p2:
-            st.number_input("¿Cuántos estudiantes clave hay en el salón?", min_value=0, max_value=100, step=1, key="estudiantes_clave")
-            st.number_input("¿Cuántos estudiantes apáticos hay en el salón?", min_value=0, max_value=100, step=1, key="estudiantes_apaticos")
+            st.number_input(
+                "¿Cuántos estudiantes clave hay en el salón?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="estudiantes_clave"
+            )
+            st.number_input(
+                "¿Cuántos estudiantes apáticos hay en el salón?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="estudiantes_apaticos"
+            )
 
-        # --- Validación suave (no resetea) ---
+        # --- Validación suave ---
         a = int(st.session_state.get("asistencia_total", 0))
         antes = int(st.session_state.get("llegaron_antes_10", 0))
         despues = int(st.session_state.get("llegaron_despues_10", 0))
@@ -399,23 +431,24 @@ def monitoring_dashboard():
     # --- Col derecha: bitácora + guardado ---
     with col_right:
         st.markdown("#### 📝 Bitácora")
-        notas = st.text_area("Notas", height=350, help="Escribe aquí. Si recargas la página, este texto se perderá.")
+        notas = st.text_area(
+            "Notas",
+            height=350,
+            help="Escribe aquí. Si recargas la página, este texto se perderá."
+        )
 
         if st.button("💾 GUARDAR Y DESCARGAR", type="primary"):
-            # Validación dura antes de guardar
             a = int(st.session_state.get("asistencia_total", 0))
             antes = int(st.session_state.get("llegaron_antes_10", 0))
             despues = int(st.session_state.get("llegaron_despues_10", 0))
             pw = int(st.session_state.get("prework_count", 0))
             hubo_pre = st.session_state.get("hubo_prework", "No")
-
             pf = int(st.session_state.get("particip_facilitador", 0))
             pv = int(st.session_state.get("particip_voluntaria", 0))
             ek = int(st.session_state.get("estudiantes_clave", 0))
             ea = int(st.session_state.get("estudiantes_apaticos", 0))
-
             inc = st.session_state.get("incidente_problematico", "No")
-            inc_est = _norm_value(st.session_state.get("incidente_estudiante", ""))
+            inc_est = st.session_state.get("incidente_estudiante", "").strip()
 
             errores = []
             if a > 0:
@@ -428,13 +461,12 @@ def monitoring_dashboard():
                 if ea > a: errores.append("• 'Estudiantes apáticos' > 'Asistencia Total'")
 
             if inc == "Sí" and inc_est == "":
-                errores.append("• Incidente = 'Sí' pero falta el estudiante")
+                errores.append("• Indicaron incidente, pero falta '¿Qué estudiante fue?'")
 
             if errores:
                 st.error("No se puede guardar. Corrige lo siguiente:\n" + "\n".join(errores))
                 return
 
-            # Cálculo final del talk time
             final_talk = st.session_state.talk_time_accumulated
             if st.session_state.is_talking and st.session_state.talk_time_start_marker:
                 final_talk += (time.time() - st.session_state.talk_time_start_marker)
