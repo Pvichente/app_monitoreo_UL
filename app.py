@@ -239,12 +239,13 @@ def monitoring_dashboard():
 
         st.divider()
 
+        # =========================
+        # 2) VARIABLES BASE
+        # =========================
         st.markdown("#### 2. Variables")
         col_vars1, col_vars2 = st.columns(2)
 
-        # IMPORTANTE:
-        # - keys fijas para que NO se reinicien valores
-        # - max_value estable (no depende de asistencia) para que NO se “bloquee” ni se resetee al cambiar asistencia
+        # Keys fijas + max_value estable para evitar reseteos/bloqueos
         with col_vars2:
             asistencia = st.number_input(
                 "Asistencia Total",
@@ -285,10 +286,6 @@ def monitoring_dashboard():
                 key="hubo_prework"
             )
 
-            # Mantener valor aunque cambie asistencia (por key fija)
-            # Si no hubo prework, guardamos 0 (sin borrar estado a la mala)
-            prework_count = int(st.session_state.get("prework_count", 0))
-
             if prework == "Sí":
                 prework_count = st.number_input(
                     "¿Cuántos estudiantes hicieron Pre-work?",
@@ -298,25 +295,92 @@ def monitoring_dashboard():
                     key="prework_count"
                 )
             else:
-                # Para consistencia de datos
                 st.session_state["prework_count"] = 0
                 prework_count = 0
 
+        st.divider()
+
+        # =========================
+        # 3) PARTICIPACIÓN Y CLIMA
+        # =========================
+        st.markdown("#### 3. Participación y clima del grupo")
+        col_p1, col_p2 = st.columns(2)
+
+        with col_p1:
+            particip_facilitador = st.number_input(
+                "¿Cuántos estudiantes participaron por solicitud del facilitador?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="particip_facilitador"
+            )
+
+            particip_voluntaria = st.number_input(
+                "¿Cuántos estudiantes participaron por voluntad propia?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="particip_voluntaria"
+            )
+
+            incidente = st.radio(
+                "¿Hubo algún incidente problemático con algún estudiante?",
+                ["Sí", "No"],
+                horizontal=True,
+                key="incidente_problematico"
+            )
+
+            if incidente == "Sí":
+                incidente_estudiante = st.text_input(
+                    "¿Qué estudiante fue?",
+                    key="incidente_estudiante"
+                )
+            else:
+                st.session_state["incidente_estudiante"] = ""
+                incidente_estudiante = ""
+
+        with col_p2:
+            estudiantes_clave = st.number_input(
+                "¿Cuántos estudiantes clave hay en el salón?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="estudiantes_clave"
+            )
+
+            estudiantes_apaticos = st.number_input(
+                "¿Cuántos estudiantes apáticos hay en el salón?",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="estudiantes_apaticos"
+            )
+
         # Validación suave (no resetea inputs)
-        a = int(asistencia)
-        b = int(llegaron_antes_10)
-        c = int(llegaron_despues_10)
-        p = int(prework_count)
+        a = int(st.session_state.get("asistencia_total", 0))
+        antes = int(st.session_state.get("llegaron_antes_10", 0))
+        despues = int(st.session_state.get("llegaron_despues_10", 0))
+        pw = int(st.session_state.get("prework_count", 0))
+        pf = int(st.session_state.get("particip_facilitador", 0))
+        pv = int(st.session_state.get("particip_voluntaria", 0))
+        ek = int(st.session_state.get("estudiantes_clave", 0))
+        ea = int(st.session_state.get("estudiantes_apaticos", 0))
 
         if a > 0:
-            if b > a:
+            if antes > a:
                 st.warning("⚠️ 'Llegaron antes de 10 min' es mayor que 'Asistencia Total'.")
-            if c > a:
+            if despues > a:
                 st.warning("⚠️ 'Llegaron después de 10 min' es mayor que 'Asistencia Total'.")
-            if (b + c) > a:
+            if (antes + despues) > a:
                 st.warning("⚠️ La suma de 'antes' + 'después' excede la 'Asistencia Total'.")
-            if prework == "Sí" and p > a:
+            if prework == "Sí" and pw > a:
                 st.warning("⚠️ 'Hicieron Pre-work' es mayor que 'Asistencia Total'.")
+            if (pf + pv) > a:
+                st.warning("⚠️ La suma de participación (facilitador + voluntaria) excede la 'Asistencia Total'.")
+            if ek > a:
+                st.warning("⚠️ 'Estudiantes clave' es mayor que 'Asistencia Total'.")
+            if ea > a:
+                st.warning("⚠️ 'Estudiantes apáticos' es mayor que 'Asistencia Total'.")
 
     with col_right:
         st.markdown("#### 📝 Bitácora")
@@ -327,19 +391,33 @@ def monitoring_dashboard():
         )
 
         if st.button("💾 GUARDAR Y DESCARGAR", type="primary"):
-            # Bloqueo de guardado si hay inconsistencias duras (opcional pero recomendado)
+            # Validación dura (solo para evitar guardados absurdos)
             a = int(st.session_state.get("asistencia_total", 0))
-            b = int(st.session_state.get("llegaron_antes_10", 0))
-            c = int(st.session_state.get("llegaron_despues_10", 0))
-            p = int(st.session_state.get("prework_count", 0))
+            antes = int(st.session_state.get("llegaron_antes_10", 0))
+            despues = int(st.session_state.get("llegaron_despues_10", 0))
+            pw = int(st.session_state.get("prework_count", 0))
             hubo_pre = st.session_state.get("hubo_prework", "No")
+
+            pf = int(st.session_state.get("particip_facilitador", 0))
+            pv = int(st.session_state.get("particip_voluntaria", 0))
+            ek = int(st.session_state.get("estudiantes_clave", 0))
+            ea = int(st.session_state.get("estudiantes_apaticos", 0))
+
+            inc = st.session_state.get("incidente_problematico", "No")
+            inc_est = st.session_state.get("incidente_estudiante", "").strip()
 
             errores = []
             if a > 0:
-                if b > a: errores.append("• 'Llegaron antes de 10 min' > 'Asistencia Total'")
-                if c > a: errores.append("• 'Llegaron después de 10 min' > 'Asistencia Total'")
-                if (b + c) > a: errores.append("• 'Antes' + 'Después' > 'Asistencia Total'")
-                if hubo_pre == "Sí" and p > a: errores.append("• 'Hicieron Pre-work' > 'Asistencia Total'")
+                if antes > a: errores.append("• 'Llegaron antes de 10 min' > 'Asistencia Total'")
+                if despues > a: errores.append("• 'Llegaron después de 10 min' > 'Asistencia Total'")
+                if (antes + despues) > a: errores.append("• 'Antes' + 'Después' > 'Asistencia Total'")
+                if hubo_pre == "Sí" and pw > a: errores.append("• 'Hicieron Pre-work' > 'Asistencia Total'")
+                if (pf + pv) > a: errores.append("• 'Participación (facilitador + voluntaria)' > 'Asistencia Total'")
+                if ek > a: errores.append("• 'Estudiantes clave' > 'Asistencia Total'")
+                if ea > a: errores.append("• 'Estudiantes apáticos' > 'Asistencia Total'")
+
+            if inc == "Sí" and inc_est == "":
+                errores.append("• Indicaron incidente, pero falta '¿Qué estudiante fue?'")
 
             if errores:
                 st.error("No se puede guardar. Corrige lo siguiente:\n" + "\n".join(errores))
@@ -364,11 +442,19 @@ def monitoring_dashboard():
 
                 "Inicio_Puntual": st.session_state.get("inicio_puntual", ""),
                 "Prework": st.session_state.get("hubo_prework", "No"),
-                "Prework_Count": int(p) if st.session_state.get("hubo_prework", "No") == "Sí" else 0,
+                "Prework_Count": int(pw) if st.session_state.get("hubo_prework", "No") == "Sí" else 0,
 
                 "Asistencia": int(a),
-                "Llegaron_Antes_10min": int(b),
-                "Llegaron_Despues_10min": int(c),
+                "Llegaron_Antes_10min": int(antes),
+                "Llegaron_Despues_10min": int(despues),
+
+                "Particip_Solicitud_Facilitador": int(pf),
+                "Particip_Voluntad_Propia": int(pv),
+                "Estudiantes_Clave": int(ek),
+                "Estudiantes_Apaticos": int(ea),
+
+                "Incidente_Problematico": inc,
+                "Incidente_Estudiante": inc_est if inc == "Sí" else "",
 
                 "Notas": notas,
             }
