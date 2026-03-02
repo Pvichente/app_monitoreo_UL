@@ -43,14 +43,12 @@ def _get_qp_value(params, key, default=None):
         return v[0] if len(v) > 0 else default
     return v
 
-# Función para guardar estado en la URL (La Caja Negra)
 def sync_to_url():
     st.query_params["talk_acum"] = str(st.session_state.talk_time_accumulated)
     st.query_params["is_talking"] = "1" if st.session_state.is_talking else "0"
     if st.session_state.talk_time_start_marker:
         st.query_params["start_marker"] = str(st.session_state.talk_time_start_marker)
 
-# Función para recuperar estado desde la URL (Resurrección)
 def restore_from_url():
     params = st.query_params
     talk_acum = _get_qp_value(params, "talk_acum", None)
@@ -73,9 +71,9 @@ def restore_from_url():
         else:
             st.session_state.talk_time_start_marker = time.time()
 
-# Inicialización de variables
+# Inicialización base
 if "init_done" not in st.session_state:
-    restore_from_url()  # ¡Aquí ocurre la magia al cargar!
+    restore_from_url()
     st.session_state.init_done = True
 
 if "logged_in" not in st.session_state: st.session_state.logged_in = False
@@ -87,7 +85,7 @@ if "is_talking" not in st.session_state: st.session_state.is_talking = False
 if "start_session_time" not in st.session_state: st.session_state.start_session_time = None
 if "context" not in st.session_state: st.session_state.context = {}
 
-# --- 5. COMPONENTE LATIDO (EVITA DESCONEXIÓN) ---
+# --- 5. COMPONENTE LATIDO ---
 @st.fragment(run_every=20)
 def keep_alive():
     st.caption(f"🟢 En línea: {datetime.datetime.now().strftime('%H:%M:%S')}")
@@ -95,7 +93,7 @@ def keep_alive():
 with st.sidebar:
     keep_alive()
 
-# --- 6. COMPONENTE RELOJ EN VIVO (TALK TIME) ---
+# --- 6. RELOJ EN VIVO (TALK TIME) ---
 @st.fragment(run_every=1)
 def live_clock_component():
     current_talk_session = 0
@@ -103,16 +101,13 @@ def live_clock_component():
         current_talk_session = time.time() - st.session_state.talk_time_start_marker
 
     total_talk_display = st.session_state.talk_time_accumulated + current_talk_session
-
     mins, secs = divmod(int(total_talk_display), 60)
     timer_str = f"{mins:02d}:{secs:02d}"
     percentage = int((total_talk_display / (90 * 60)) * 100)
-    if percentage < 0: percentage = 0
-    if percentage > 999: percentage = 999  # solo para evitar valores absurdos
-
+    percentage = max(0, min(percentage, 999))
     st.metric("Acumulado (En vivo)", timer_str, f"{percentage}% (de 90m)")
 
-# --- 7. GUARDADO LOCAL (ROBUSTO A CAMBIOS DE COLUMNAS) ---
+# --- 7. GUARDADO LOCAL ROBUSTO ---
 def save_observation_locally(data_dict):
     file_path = "observaciones_consolidado.csv"
     new_row = pd.DataFrame([data_dict])
@@ -124,12 +119,12 @@ def save_observation_locally(data_dict):
     try:
         old = pd.read_csv(file_path, encoding="utf-8-sig")
     except:
-        old = pd.read_csv(file_path)  # fallback
+        old = pd.read_csv(file_path)
 
     combined = pd.concat([old, new_row], ignore_index=True)
     combined.to_csv(file_path, index=False, encoding="utf-8-sig")
 
-# --- PANTALLAS (Lógica Principal) ---
+# --- PANTALLAS ---
 
 def login_screen():
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -140,8 +135,8 @@ def login_screen():
 
         if not df_users.empty and "Nombre" in df_users.columns:
             lista_nombres = df_users["Nombre"].dropna().unique().tolist()
-            selected_user = st.selectbox("Usuario", lista_nombres)
-            password = st.text_input("Contraseña", type="password")
+            selected_user = st.selectbox("Usuario", lista_nombres, key="login_user")
+            password = st.text_input("Contraseña", type="password", key="login_pass")
 
             if st.button("INGRESAR", type="primary"):
                 try:
@@ -155,7 +150,6 @@ def login_screen():
                 except:
                     st.error("Error de validación")
 
-
 def context_screen():
     st.title(f"Hola, {st.session_state.user_name} 👋")
     with st.spinner("Cargando cursos..."):
@@ -165,18 +159,19 @@ def context_screen():
 
     col1, col2 = st.columns(2)
     with col1:
-        trimestre = st.selectbox("Trimestre", sorted(df["Trimestre"].astype(str).unique()))
+        trimestre = st.selectbox("Trimestre", sorted(df["Trimestre"].astype(str).unique()), key="ctx_trimestre")
         df_t = df[df["Trimestre"].astype(str) == str(trimestre)]
-        curso = st.selectbox("Curso", sorted(df_t["Curso"].unique()))
+        curso = st.selectbox("Curso", sorted(df_t["Curso"].unique()), key="ctx_curso")
+
     with col2:
         df_c = df_t[df_t["Curso"] == curso]
-        grupo = st.selectbox("Grupo", sorted(df_c["Grupo"].unique()))
+        grupo = st.selectbox("Grupo", sorted(df_c["Grupo"].unique()), key="ctx_grupo")
         try:
             facilitador_nombre = df_c[df_c["Grupo"] == grupo].iloc[0]["Facilitador"]
         except:
             facilitador_nombre = "No asignado"
         st.text_input("Facilitador", value=facilitador_nombre, disabled=True)
-        sesion = st.selectbox("Sesión", range(1, 21))
+        sesion = st.selectbox("Sesión", range(1, 21), key="ctx_sesion")
 
     st.divider()
     if st.button("INICIAR OBSERVACIÓN 🚀", use_container_width=True, type="primary"):
@@ -190,7 +185,6 @@ def context_screen():
         st.session_state.monitoring_active = True
         st.session_state.start_session_time = datetime.datetime.now()
         st.rerun()
-
 
 def monitoring_dashboard():
     st.markdown("### 📡 Tablero de Monitoreo")
@@ -248,39 +242,81 @@ def monitoring_dashboard():
         st.markdown("#### 2. Variables")
         col_vars1, col_vars2 = st.columns(2)
 
-        # Primero capturamos asistencia para poder usarla como límite
+        # IMPORTANTE:
+        # - keys fijas para que NO se reinicien valores
+        # - max_value estable (no depende de asistencia) para que NO se “bloquee” ni se resetee al cambiar asistencia
         with col_vars2:
-            asistencia = st.number_input("Asistencia Total", 0, 100)
-
-            max_est = asistencia if asistencia and asistencia > 0 else 100
+            asistencia = st.number_input(
+                "Asistencia Total",
+                min_value=0,
+                max_value=100,
+                step=1,
+                key="asistencia_total"
+            )
 
             llegaron_antes_10 = st.number_input(
                 "¿Cuántos estudiantes llegaron antes de los 10 minutos?",
                 min_value=0,
-                max_value=max_est,
-                step=1
+                max_value=100,
+                step=1,
+                key="llegaron_antes_10"
             )
 
             llegaron_despues_10 = st.number_input(
                 "¿Cuántos estudiantes llegaron después de los 10 minutos?",
                 min_value=0,
-                max_value=max_est,
-                step=1
+                max_value=100,
+                step=1,
+                key="llegaron_despues_10"
             )
 
         with col_vars1:
-            inicio_puntual = st.radio("¿Puntual?", ["Sí", "No"], horizontal=True)
+            inicio_puntual = st.radio(
+                "¿Puntual?",
+                ["Sí", "No"],
+                horizontal=True,
+                key="inicio_puntual"
+            )
 
-            prework = st.radio("¿Hubo Pre-work?", ["Sí", "No"], horizontal=True)
+            prework = st.radio(
+                "¿Hubo Pre-work?",
+                ["Sí", "No"],
+                horizontal=True,
+                key="hubo_prework"
+            )
 
-            prework_count = 0
+            # Mantener valor aunque cambie asistencia (por key fija)
+            # Si no hubo prework, guardamos 0 (sin borrar estado a la mala)
+            prework_count = int(st.session_state.get("prework_count", 0))
+
             if prework == "Sí":
                 prework_count = st.number_input(
                     "¿Cuántos estudiantes hicieron Pre-work?",
                     min_value=0,
-                    max_value=max_est,
-                    step=1
+                    max_value=100,
+                    step=1,
+                    key="prework_count"
                 )
+            else:
+                # Para consistencia de datos
+                st.session_state["prework_count"] = 0
+                prework_count = 0
+
+        # Validación suave (no resetea inputs)
+        a = int(asistencia)
+        b = int(llegaron_antes_10)
+        c = int(llegaron_despues_10)
+        p = int(prework_count)
+
+        if a > 0:
+            if b > a:
+                st.warning("⚠️ 'Llegaron antes de 10 min' es mayor que 'Asistencia Total'.")
+            if c > a:
+                st.warning("⚠️ 'Llegaron después de 10 min' es mayor que 'Asistencia Total'.")
+            if (b + c) > a:
+                st.warning("⚠️ La suma de 'antes' + 'después' excede la 'Asistencia Total'.")
+            if prework == "Sí" and p > a:
+                st.warning("⚠️ 'Hicieron Pre-work' es mayor que 'Asistencia Total'.")
 
     with col_right:
         st.markdown("#### 📝 Bitácora")
@@ -291,6 +327,24 @@ def monitoring_dashboard():
         )
 
         if st.button("💾 GUARDAR Y DESCARGAR", type="primary"):
+            # Bloqueo de guardado si hay inconsistencias duras (opcional pero recomendado)
+            a = int(st.session_state.get("asistencia_total", 0))
+            b = int(st.session_state.get("llegaron_antes_10", 0))
+            c = int(st.session_state.get("llegaron_despues_10", 0))
+            p = int(st.session_state.get("prework_count", 0))
+            hubo_pre = st.session_state.get("hubo_prework", "No")
+
+            errores = []
+            if a > 0:
+                if b > a: errores.append("• 'Llegaron antes de 10 min' > 'Asistencia Total'")
+                if c > a: errores.append("• 'Llegaron después de 10 min' > 'Asistencia Total'")
+                if (b + c) > a: errores.append("• 'Antes' + 'Después' > 'Asistencia Total'")
+                if hubo_pre == "Sí" and p > a: errores.append("• 'Hicieron Pre-work' > 'Asistencia Total'")
+
+            if errores:
+                st.error("No se puede guardar. Corrige lo siguiente:\n" + "\n".join(errores))
+                return
+
             # Cálculo final del talk time
             final_talk = st.session_state.talk_time_accumulated
             if st.session_state.is_talking and st.session_state.talk_time_start_marker:
@@ -308,14 +362,13 @@ def monitoring_dashboard():
                 "Sesion": ctx.get("sesion", ""),
                 "Talk_Time_Sec": int(final_talk),
 
-                "Inicio_Puntual": inicio_puntual,
+                "Inicio_Puntual": st.session_state.get("inicio_puntual", ""),
+                "Prework": st.session_state.get("hubo_prework", "No"),
+                "Prework_Count": int(p) if st.session_state.get("hubo_prework", "No") == "Sí" else 0,
 
-                "Prework": prework,
-                "Prework_Count": int(prework_count),
-
-                "Asistencia": int(asistencia),
-                "Llegaron_Antes_10min": int(llegaron_antes_10),
-                "Llegaron_Despues_10min": int(llegaron_despues_10),
+                "Asistencia": int(a),
+                "Llegaron_Antes_10min": int(b),
+                "Llegaron_Despues_10min": int(c),
 
                 "Notas": notas,
             }
@@ -327,7 +380,6 @@ def monitoring_dashboard():
 
             st.success("¡Datos procesados! Descarga el archivo para terminar.")
             st.query_params.clear()
-
 
 # --- CONTROLADOR ---
 if not st.session_state.logged_in:
