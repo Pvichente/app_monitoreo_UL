@@ -25,18 +25,23 @@ SHEET_ID = "17XScIYv_FzsYApoF30p6PPZm6moUqH6WLzD33cetPbs"
 
 def load_google_sheet(sheet_name: str) -> pd.DataFrame:
     """
-    Carga directa de Google Sheets como CSV usando gviz.
-    SIN cache, para que las contraseñas nuevas se tomen siempre.
+    Carga datos desde Google Sheets.
+    - Para 'Course Managers' usamos export?format=csv&gid=0 (evita el bug raro de gviz).
+    - Para otras hojas usamos gviz + nombre de pestaña.
     """
-    url = (
-        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
-        f"?tqx=out:csv&sheet={sheet_name.replace(' ', '%20')}"
-    )
     try:
+        if sheet_name == "Course Managers":
+            # GID=0 según la URL que compartiste
+            url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
+        else:
+            url = (
+                f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
+                f"?tqx=out:csv&sheet={sheet_name.replace(' ', '%20')}"
+            )
         df = pd.read_csv(url)
         return df
     except Exception as e:
-        st.error(f"Error de conexión con Google Sheets: {e}")
+        st.error(f"Error de conexión con Google Sheets ({sheet_name}): {e}")
         return pd.DataFrame()
 
 # --- 4. GESTIÓN DE MEMORIA Y RECUPERACIÓN (BLINDAJE TALK-TIME) ---
@@ -152,7 +157,7 @@ def save_observation_locally(data_dict):
     combined = pd.concat([old, new_row], ignore_index=True)
     combined.to_csv(file_path, index=False, encoding="utf-8-sig")
 
-# --- PANTALLAS ---
+# --- LOGIN ---
 def login_screen():
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -165,9 +170,14 @@ def login_screen():
             st.error("No se pudo cargar la hoja 'Course Managers'.")
             return
 
-        # Aquí asumo que las columnas se llaman exactamente 'Nombre' y 'Contraseña'
+        # DEBUG opcional: descomenta si quieres ver qué llega realmente
+        # st.write(df_users)
+
         if "Nombre" not in df_users.columns or "Contraseña" not in df_users.columns:
-            st.error(f"No encuentro las columnas 'Nombre' y 'Contraseña'. Columnas detectadas: {list(df_users.columns)}")
+            st.error(
+                "No encuentro las columnas 'Nombre' y 'Contraseña'. "
+                f"Columnas detectadas: {list(df_users.columns)}"
+            )
             return
 
         lista_nombres = df_users["Nombre"].dropna().unique().tolist()
@@ -191,6 +201,7 @@ def login_screen():
             else:
                 st.error("Contraseña incorrecta")
 
+# --- CONTEXTO ---
 def context_screen():
     st.title(f"Hola, {st.session_state.user_name} 👋")
 
@@ -238,11 +249,11 @@ def context_screen():
         st.session_state.start_session_time = datetime.datetime.now()
         st.rerun()
 
+# --- DASHBOARD ---
 def monitoring_dashboard():
     st.markdown("### 📡 Tablero de Monitoreo")
     col_left, col_center, col_right = st.columns([1, 2.5, 1.2])
 
-    # --- Col izquierda: contexto ---
     with col_left:
         st.info(f"**Manager:** {st.session_state.user_name}")
         ctx = st.session_state.context
@@ -266,7 +277,6 @@ def monitoring_dashboard():
             st.session_state.clear()
             st.rerun()
 
-    # --- Col centro: tablero ---
     with col_center:
         st.markdown("#### 1. Tiempo de Habla")
         tt_col1, tt_col2 = st.columns([1, 1])
@@ -293,116 +303,40 @@ def monitoring_dashboard():
 
         st.divider()
 
-        # =========================
-        # 2) VARIABLES BASE
-        # =========================
         st.markdown("#### 2. Variables")
         col_vars1, col_vars2 = st.columns(2)
 
         with col_vars2:
-            st.number_input(
-                "Asistencia Total",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="asistencia_total"
-            )
-            st.number_input(
-                "¿Cuántos estudiantes llegaron antes de los 10 minutos?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="llegaron_antes_10"
-            )
-            st.number_input(
-                "¿Cuántos estudiantes llegaron después de los 10 minutos?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="llegaron_despues_10"
-            )
+            st.number_input("Asistencia Total", 0, 100, key="asistencia_total")
+            st.number_input("¿Cuántos estudiantes llegaron antes de los 10 minutos?", 0, 100, key="llegaron_antes_10")
+            st.number_input("¿Cuántos estudiantes llegaron después de los 10 minutos?", 0, 100, key="llegaron_despues_10")
 
         with col_vars1:
-            st.radio(
-                "¿Puntual?",
-                ["Sí", "No"],
-                horizontal=True,
-                key="inicio_puntual"
-            )
-            st.radio(
-                "¿Hubo Pre-work?",
-                ["Sí", "No"],
-                horizontal=True,
-                key="hubo_prework"
-            )
-
+            st.radio("¿Puntual?", ["Sí", "No"], horizontal=True, key="inicio_puntual")
+            st.radio("¿Hubo Pre-work?", ["Sí", "No"], horizontal=True, key="hubo_prework")
             if st.session_state.get("hubo_prework", "No") == "Sí":
-                st.number_input(
-                    "¿Cuántos estudiantes hicieron Pre-work?",
-                    min_value=0,
-                    max_value=100,
-                    step=1,
-                    key="prework_count"
-                )
+                st.number_input("¿Cuántos estudiantes hicieron Pre-work?", 0, 100, key="prework_count")
             else:
                 st.session_state["prework_count"] = 0
 
         st.divider()
 
-        # =========================
-        # 3) PARTICIPACIÓN Y CLIMA
-        # =========================
         st.markdown("#### 3. Participación y clima del grupo")
         col_p1, col_p2 = st.columns(2)
 
         with col_p1:
-            st.number_input(
-                "¿Cuántos estudiantes participaron por solicitud del facilitador?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="particip_facilitador"
-            )
-            st.number_input(
-                "¿Cuántos estudiantes participaron por voluntad propia?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="particip_voluntaria"
-            )
-
-            st.radio(
-                "¿Hubo algún incidente problemático con algún estudiante?",
-                ["Sí", "No"],
-                horizontal=True,
-                key="incidente_problematico"
-            )
+            st.number_input("¿Cuántos estudiantes participaron por solicitud del facilitador?", 0, 100, key="particip_facilitador")
+            st.number_input("¿Cuántos estudiantes participaron por voluntad propia?", 0, 100, key="particip_voluntaria")
+            st.radio("¿Hubo algún incidente problemático con algún estudiante?", ["Sí", "No"], horizontal=True, key="incidente_problematico")
             if st.session_state.get("incidente_problematico", "No") == "Sí":
-                st.text_input(
-                    "¿Qué estudiante fue?",
-                    key="incidente_estudiante",
-                    placeholder="Nombre del estudiante"
-                )
+                st.text_input("¿Qué estudiante fue?", key="incidente_estudiante", placeholder="Nombre del estudiante")
             else:
                 st.session_state["incidente_estudiante"] = ""
 
         with col_p2:
-            st.number_input(
-                "¿Cuántos estudiantes clave hay en el salón?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="estudiantes_clave"
-            )
-            st.number_input(
-                "¿Cuántos estudiantes apáticos hay en el salón?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="estudiantes_apaticos"
-            )
+            st.number_input("¿Cuántos estudiantes clave hay en el salón?", 0, 100, key="estudiantes_clave")
+            st.number_input("¿Cuántos estudiantes apáticos hay en el salón?", 0, 100, key="estudiantes_apaticos")
 
-        # --- Validación suave ---
         a = int(st.session_state.get("asistencia_total", 0))
         antes = int(st.session_state.get("llegaron_antes_10", 0))
         despues = int(st.session_state.get("llegaron_despues_10", 0))
@@ -413,29 +347,17 @@ def monitoring_dashboard():
         ea = int(st.session_state.get("estudiantes_apaticos", 0))
 
         if a > 0:
-            if antes > a:
-                st.warning("⚠️ 'Llegaron antes de 10 min' es mayor que 'Asistencia Total'.")
-            if despues > a:
-                st.warning("⚠️ 'Llegaron después de 10 min' es mayor que 'Asistencia Total'.")
-            if (antes + despues) > a:
-                st.warning("⚠️ La suma 'antes + después' excede la 'Asistencia Total'.")
-            if st.session_state.get("hubo_prework", "No") == "Sí" and pw > a:
-                st.warning("⚠️ 'Hicieron Pre-work' es mayor que 'Asistencia Total'.")
-            if (pf + pv) > a:
-                st.warning("⚠️ 'Participación (solicitud + voluntad)' excede la 'Asistencia Total'.")
-            if ek > a:
-                st.warning("⚠️ 'Estudiantes clave' es mayor que 'Asistencia Total'.")
-            if ea > a:
-                st.warning("⚠️ 'Estudiantes apáticos' es mayor que 'Asistencia Total'.")
+            if antes > a: st.warning("⚠️ 'Llegaron antes de 10 min' > 'Asistencia Total'.")
+            if despues > a: st.warning("⚠️ 'Llegaron después de 10 min' > 'Asistencia Total'.")
+            if (antes + despues) > a: st.warning("⚠️ 'Antes + Después' > 'Asistencia Total'.")
+            if st.session_state.get("hubo_prework", "No") == "Sí" and pw > a: st.warning("⚠️ 'Hicieron Pre-work' > 'Asistencia Total'.")
+            if (pf + pv) > a: st.warning("⚠️ 'Participación (solicitud + voluntad)' > 'Asistencia Total'.")
+            if ek > a: st.warning("⚠️ 'Estudiantes clave' > 'Asistencia Total'.")
+            if ea > a: st.warning("⚠️ 'Estudiantes apáticos' > 'Asistencia Total'.")
 
-    # --- Col derecha: bitácora + guardado ---
     with col_right:
         st.markdown("#### 📝 Bitácora")
-        notas = st.text_area(
-            "Notas",
-            height=350,
-            help="Escribe aquí. Si recargas la página, este texto se perderá."
-        )
+        notas = st.text_area("Notas", height=350)
 
         if st.button("💾 GUARDAR Y DESCARGAR", type="primary"):
             a = int(st.session_state.get("asistencia_total", 0))
