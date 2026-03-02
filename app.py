@@ -1,476 +1,242 @@
-import streamlit as st
+# =========================
+# CLA+ 2024/2025 vs LO's
+# Exporta resultados a Excel
+# =========================
+
+import io
+import numpy as np
 import pandas as pd
-import datetime
-import time
-import os
 
-# --- 1. CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(
-    page_title="Monitor Blindado",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+from google.colab import files
 
-# --- 2. ESTILOS VISUALES ---
-st.markdown("""
-    <style>
-    .big-font { font-size:24px !important; font-weight: bold; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; }
-    .metric-box { border: 1px solid #e0e0e0; padding: 10px; border-radius: 5px; background-color: #f9f9f9; text-align: center;}
-    </style>
-    """, unsafe_allow_html=True)
+from scipy.stats import pearsonr, spearmanr
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LassoCV
+from sklearn.model_selection import KFold
 
-# --- 3. CONEXIÓN A GOOGLE SHEETS ---
-SHEET_ID = "17XScIYv_FzsYApoF30p6PPZm6moUqH6WLzD33cetPbs"
+# -------------------------
+# Helpers
+# -------------------------
+def normalize_id(s):
+    return (
+        s.astype(str)
+         .str.strip()
+         .str.upper()
+    )
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_google_sheet(sheet_name: str) -> pd.DataFrame:
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={sheet_name.replace(' ', '%20')}"
-    try:
-        return pd.read_csv(url)
-    except Exception as e:
-        st.error(f"Error de conexión: {e}")
-        return pd.DataFrame()
+def pick_score_column(df, preferred_keywords=("cla_total", "total", "score")):
+    """
+    Intenta detectar la columna de puntaje total CLA+.
+    Prioriza coincidencias por keywords en el nombre.
+    """
+    cols = [c for c in df.columns]
+    lower = {c: c.lower() for c in cols}
 
-# --- 4. GESTIÓN DE MEMORIA Y RECUPERACIÓN (EL BLINDAJE) ---
+    # candidatos numéricos
+    num_cols = []
+    for c in cols:
+        if c.lower() in ("matricula", "id", "student_id"):
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]):
+            num_cols.append(c)
 
-def _get_qp_value(params, key, default=None):
-    """st.query_params puede devolver str o list[str] según versión/config."""
-    if key not in params:
-        return default
-    v = params[key]
-    if isinstance(v, list):
-        return v[0] if len(v) > 0 else default
-    return v
+    # preferidos por keyword
+    for kw in preferred_keywords:
+        hits = [c for c in num_cols if kw in lower[c]]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            # si hay varios, elige el de menor % nulos
+            hits = sorted(hits, key=lambda x: df[x].isna().mean())
+            return hits[0]
 
-def sync_to_url():
-    st.query_params["talk_acum"] = str(st.session_state.talk_time_accumulated)
-    st.query_params["is_talking"] = "1" if st.session_state.is_talking else "0"
-    if st.session_state.talk_time_start_marker:
-        st.query_params["start_marker"] = str(st.session_state.talk_time_start_marker)
+    # fallback: el numérico con menos nulos
+    if num_cols:
+        num_cols = sorted(num_cols, key=lambda x: df[x].isna().mean())
+        return num_cols[0]
 
-def restore_from_url():
-    params = st.query_params
-    talk_acum = _get_qp_value(params, "talk_acum", None)
-    is_talking = _get_qp_value(params, "is_talking", "0")
-    start_marker = _get_qp_value(params, "start_marker", None)
+    raise ValueError("No se pudo detectar una columna numérica de score en el archivo CLA+.")
 
-    if talk_acum is not None:
-        try:
-            st.session_state.talk_time_accumulated = float(talk_acum)
-        except:
-            st.session_state.talk_time_accumulated = 0.0
+def fdr_bh(pvals):
+    """
+    Benjamini-Hochberg FDR correction.
+    Devuelve q-values en el mismo orden.
+    """
+    pvals = np.array(pvals, dtype=float)
+    n = len(pvals)
+    order = np.argsort(pvals)
+    ranked = pvals[order]
+    q = np.empty(n, dtype=float)
+    prev = 1.0
+    for i in range(n-1, -1, -1):
+        rank = i + 1
+        val = ranked[i] * n / rank
+        prev = min(prev, val)
+        q[i] = prev
+    out = np.empty(n, dtype=float)
+    out[order] = q
+    return out
 
-    if is_talking == "1":
-        st.session_state.is_talking = True
-        if start_marker is not None:
-            try:
-                st.session_state.talk_time_start_marker = float(start_marker)
-            except:
-                st.session_state.talk_time_start_marker = time.time()
+def corr_table(df, y_col, lo_cols):
+    rows = []
+    for lo in lo_cols:
+        sub = df[[y_col, lo]].dropna()
+        if len(sub) < 10:
+            continue
+        r_p, p_p = pearsonr(sub[y_col], sub[lo])
+        r_s, p_s = spearmanr(sub[y_col], sub[lo])
+        rows.append({
+            "LO": lo,
+            "n": len(sub),
+            "pearson_r": r_p,
+            "pearson_p": p_p,
+            "spearman_r": r_s,
+            "spearman_p": p_s
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out["pearson_q_fdr"] = fdr_bh(out["pearson_p"].values)
+    out["spearman_q_fdr"] = fdr_bh(out["spearman_p"].values)
+    out["abs_pearson_r"] = out["pearson_r"].abs()
+    out = out.sort_values("abs_pearson_r", ascending=False).drop(columns=["abs_pearson_r"])
+    return out
+
+# -------------------------
+# 1) Cargar archivos
+# -------------------------
+print("Sube 3 archivos: cla_2024.csv, cla_2025.csv, los.csv")
+uploaded = files.upload()
+
+def read_csv_from_upload(name_hint):
+    # busca por substring
+    matches = [k for k in uploaded.keys() if name_hint in k.lower()]
+    if not matches:
+        raise FileNotFoundError(f"No encontré archivo con '{name_hint}' en el nombre. Archivos: {list(uploaded.keys())}")
+    fname = matches[0]
+    return fname, pd.read_csv(io.BytesIO(uploaded[fname]))
+
+cla24_name, cla24 = read_csv_from_upload("2024")
+cla25_name, cla25 = read_csv_from_upload("2025")
+los_name, los = read_csv_from_upload("lo")
+
+print("Cargados:", cla24_name, cla25_name, los_name)
+
+# -------------------------
+# 2) Normalizar llaves
+# -------------------------
+# Ajusta aquí si tu llave no se llama 'matricula'
+id_col = "matricula"
+for d in (cla24, cla25, los):
+    if id_col not in d.columns:
+        # intenta detectar alternativas
+        candidates = [c for c in d.columns if c.lower() in ("matricula","id","student_id","studentid")]
+        if candidates:
+            d.rename(columns={candidates[0]: id_col}, inplace=True)
         else:
-            st.session_state.talk_time_start_marker = time.time()
-
-# Inicialización base
-if "init_done" not in st.session_state:
-    restore_from_url()
-    st.session_state.init_done = True
-
-if "logged_in" not in st.session_state: st.session_state.logged_in = False
-if "user_name" not in st.session_state: st.session_state.user_name = ""
-if "monitoring_active" not in st.session_state: st.session_state.monitoring_active = False
-if "talk_time_accumulated" not in st.session_state: st.session_state.talk_time_accumulated = 0.0
-if "talk_time_start_marker" not in st.session_state: st.session_state.talk_time_start_marker = None
-if "is_talking" not in st.session_state: st.session_state.is_talking = False
-if "start_session_time" not in st.session_state: st.session_state.start_session_time = None
-if "context" not in st.session_state: st.session_state.context = {}
-
-# --- 5. COMPONENTE LATIDO ---
-@st.fragment(run_every=20)
-def keep_alive():
-    st.caption(f"🟢 En línea: {datetime.datetime.now().strftime('%H:%M:%S')}")
-
-with st.sidebar:
-    keep_alive()
-
-# --- 6. RELOJ EN VIVO (TALK TIME) ---
-@st.fragment(run_every=1)
-def live_clock_component():
-    current_talk_session = 0
-    if st.session_state.is_talking and st.session_state.talk_time_start_marker:
-        current_talk_session = time.time() - st.session_state.talk_time_start_marker
-
-    total_talk_display = st.session_state.talk_time_accumulated + current_talk_session
-    mins, secs = divmod(int(total_talk_display), 60)
-    timer_str = f"{mins:02d}:{secs:02d}"
-    percentage = int((total_talk_display / (90 * 60)) * 100)
-    percentage = max(0, min(percentage, 999))
-    st.metric("Acumulado (En vivo)", timer_str, f"{percentage}% (de 90m)")
-
-# --- 7. GUARDADO LOCAL ROBUSTO ---
-def save_observation_locally(data_dict):
-    file_path = "observaciones_consolidado.csv"
-    new_row = pd.DataFrame([data_dict])
-
-    if not os.path.exists(file_path):
-        new_row.to_csv(file_path, index=False, encoding="utf-8-sig")
-        return
-
-    try:
-        old = pd.read_csv(file_path, encoding="utf-8-sig")
-    except:
-        old = pd.read_csv(file_path)
-
-    combined = pd.concat([old, new_row], ignore_index=True)
-    combined.to_csv(file_path, index=False, encoding="utf-8-sig")
-
-# --- PANTALLAS ---
-
-def login_screen():
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.title("🛡️ Monitor Blindado")
-        with st.spinner("Conectando..."):
-            df_users = load_google_sheet("Course Managers")
-
-        if not df_users.empty and "Nombre" in df_users.columns:
-            lista_nombres = df_users["Nombre"].dropna().unique().tolist()
-            selected_user = st.selectbox("Usuario", lista_nombres, key="login_user")
-            password = st.text_input("Contraseña", type="password", key="login_pass")
-
-            if st.button("INGRESAR", type="primary"):
-                try:
-                    user_row = df_users[df_users["Nombre"] == selected_user].iloc[0]
-                    if password.strip() == str(user_row["Contraseña"]).strip():
-                        st.session_state.logged_in = True
-                        st.session_state.user_name = selected_user
-                        st.rerun()
-                    else:
-                        st.error("Contraseña incorrecta")
-                except:
-                    st.error("Error de validación")
-
-def context_screen():
-    st.title(f"Hola, {st.session_state.user_name} 👋")
-    with st.spinner("Cargando cursos..."):
-        df = load_google_sheet("Facilitadores")
-    if df.empty:
-        st.stop()
-
-    col1, col2 = st.columns(2)
-    with col1:
-        trimestre = st.selectbox("Trimestre", sorted(df["Trimestre"].astype(str).unique()), key="ctx_trimestre")
-        df_t = df[df["Trimestre"].astype(str) == str(trimestre)]
-        curso = st.selectbox("Curso", sorted(df_t["Curso"].unique()), key="ctx_curso")
-
-    with col2:
-        df_c = df_t[df_t["Curso"] == curso]
-        grupo = st.selectbox("Grupo", sorted(df_c["Grupo"].unique()), key="ctx_grupo")
-        try:
-            facilitador_nombre = df_c[df_c["Grupo"] == grupo].iloc[0]["Facilitador"]
-        except:
-            facilitador_nombre = "No asignado"
-        st.text_input("Facilitador", value=facilitador_nombre, disabled=True)
-        sesion = st.selectbox("Sesión", range(1, 21), key="ctx_sesion")
-
-    st.divider()
-    if st.button("INICIAR OBSERVACIÓN 🚀", use_container_width=True, type="primary"):
-        st.session_state.context = {
-            "trimestre": str(trimestre),
-            "curso": curso,
-            "facilitador": facilitador_nombre,
-            "grupo": grupo,
-            "sesion": int(sesion),
-        }
-        st.session_state.monitoring_active = True
-        st.session_state.start_session_time = datetime.datetime.now()
-        st.rerun()
-
-def monitoring_dashboard():
-    st.markdown("### 📡 Tablero de Monitoreo")
-    col_left, col_center, col_right = st.columns([1, 2.5, 1.2])
-
-    with col_left:
-        st.info(f"**Manager:** {st.session_state.user_name}")
-        ctx = st.session_state.context
-        st.markdown(
-            f"**Curso:** {ctx.get('curso','')}\n\n"
-            f"**Prof:** {ctx.get('facilitador','')}\n\n"
-            f"**Grupo:** {ctx.get('grupo','')}\n\n"
-            f"**Sesión:** {ctx.get('sesion','')}"
-        )
-
-        @st.fragment(run_every=1)
-        def session_clock():
-            if st.session_state.start_session_time:
-                elapsed = datetime.datetime.now() - st.session_state.start_session_time
-                st.metric("Tiempo Sesión", str(elapsed).split(".")[0])
-
-        session_clock()
-
-        if st.button("Salir (Sin Guardar)"):
-            st.query_params.clear()
-            st.session_state.clear()
-            st.rerun()
-
-    with col_center:
-        st.markdown("#### 1. Tiempo de Habla")
-        tt_col1, tt_col2 = st.columns([1, 1])
-
-        with tt_col1:
-            btn_label = "🔴 PAUSAR" if st.session_state.is_talking else "🟢 ACTIVAR"
-            if st.button(btn_label, type="primary" if st.session_state.is_talking else "secondary"):
-                if not st.session_state.is_talking:
-                    st.session_state.is_talking = True
-                    st.session_state.talk_time_start_marker = time.time()
-                else:
-                    st.session_state.is_talking = False
-                    if st.session_state.talk_time_start_marker:
-                        st.session_state.talk_time_accumulated += (
-                            time.time() - st.session_state.talk_time_start_marker
-                        )
-                        st.session_state.talk_time_start_marker = None
-
-                sync_to_url()
-                st.rerun()
-
-        with tt_col2:
-            live_clock_component()
-
-        st.divider()
-
-        # =========================
-        # 2) VARIABLES BASE
-        # =========================
-        st.markdown("#### 2. Variables")
-        col_vars1, col_vars2 = st.columns(2)
-
-        # Keys fijas + max_value estable para evitar reseteos/bloqueos
-        with col_vars2:
-            asistencia = st.number_input(
-                "Asistencia Total",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="asistencia_total"
-            )
-
-            llegaron_antes_10 = st.number_input(
-                "¿Cuántos estudiantes llegaron antes de los 10 minutos?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="llegaron_antes_10"
-            )
-
-            llegaron_despues_10 = st.number_input(
-                "¿Cuántos estudiantes llegaron después de los 10 minutos?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="llegaron_despues_10"
-            )
-
-        with col_vars1:
-            inicio_puntual = st.radio(
-                "¿Puntual?",
-                ["Sí", "No"],
-                horizontal=True,
-                key="inicio_puntual"
-            )
-
-            prework = st.radio(
-                "¿Hubo Pre-work?",
-                ["Sí", "No"],
-                horizontal=True,
-                key="hubo_prework"
-            )
-
-            if prework == "Sí":
-                prework_count = st.number_input(
-                    "¿Cuántos estudiantes hicieron Pre-work?",
-                    min_value=0,
-                    max_value=100,
-                    step=1,
-                    key="prework_count"
-                )
-            else:
-                st.session_state["prework_count"] = 0
-                prework_count = 0
-
-        st.divider()
-
-        # =========================
-        # 3) PARTICIPACIÓN Y CLIMA
-        # =========================
-        st.markdown("#### 3. Participación y clima del grupo")
-        col_p1, col_p2 = st.columns(2)
-
-        with col_p1:
-            particip_facilitador = st.number_input(
-                "¿Cuántos estudiantes participaron por solicitud del facilitador?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="particip_facilitador"
-            )
-
-            particip_voluntaria = st.number_input(
-                "¿Cuántos estudiantes participaron por voluntad propia?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="particip_voluntaria"
-            )
-
-            incidente = st.radio(
-                "¿Hubo algún incidente problemático con algún estudiante?",
-                ["Sí", "No"],
-                horizontal=True,
-                key="incidente_problematico"
-            )
-
-            if incidente == "Sí":
-                incidente_estudiante = st.text_input(
-                    "¿Qué estudiante fue?",
-                    key="incidente_estudiante"
-                )
-            else:
-                st.session_state["incidente_estudiante"] = ""
-                incidente_estudiante = ""
-
-        with col_p2:
-            estudiantes_clave = st.number_input(
-                "¿Cuántos estudiantes clave hay en el salón?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="estudiantes_clave"
-            )
-
-            estudiantes_apaticos = st.number_input(
-                "¿Cuántos estudiantes apáticos hay en el salón?",
-                min_value=0,
-                max_value=100,
-                step=1,
-                key="estudiantes_apaticos"
-            )
-
-        # Validación suave (no resetea inputs)
-        a = int(st.session_state.get("asistencia_total", 0))
-        antes = int(st.session_state.get("llegaron_antes_10", 0))
-        despues = int(st.session_state.get("llegaron_despues_10", 0))
-        pw = int(st.session_state.get("prework_count", 0))
-        pf = int(st.session_state.get("particip_facilitador", 0))
-        pv = int(st.session_state.get("particip_voluntaria", 0))
-        ek = int(st.session_state.get("estudiantes_clave", 0))
-        ea = int(st.session_state.get("estudiantes_apaticos", 0))
-
-        if a > 0:
-            if antes > a:
-                st.warning("⚠️ 'Llegaron antes de 10 min' es mayor que 'Asistencia Total'.")
-            if despues > a:
-                st.warning("⚠️ 'Llegaron después de 10 min' es mayor que 'Asistencia Total'.")
-            if (antes + despues) > a:
-                st.warning("⚠️ La suma de 'antes' + 'después' excede la 'Asistencia Total'.")
-            if prework == "Sí" and pw > a:
-                st.warning("⚠️ 'Hicieron Pre-work' es mayor que 'Asistencia Total'.")
-            if (pf + pv) > a:
-                st.warning("⚠️ La suma de participación (facilitador + voluntaria) excede la 'Asistencia Total'.")
-            if ek > a:
-                st.warning("⚠️ 'Estudiantes clave' es mayor que 'Asistencia Total'.")
-            if ea > a:
-                st.warning("⚠️ 'Estudiantes apáticos' es mayor que 'Asistencia Total'.")
-
-    with col_right:
-        st.markdown("#### 📝 Bitácora")
-        notas = st.text_area(
-            "Notas",
-            height=350,
-            help="Escribe aquí. Si recargas la página, este texto se perderá, ¡cuidado!"
-        )
-
-        if st.button("💾 GUARDAR Y DESCARGAR", type="primary"):
-            # Validación dura (solo para evitar guardados absurdos)
-            a = int(st.session_state.get("asistencia_total", 0))
-            antes = int(st.session_state.get("llegaron_antes_10", 0))
-            despues = int(st.session_state.get("llegaron_despues_10", 0))
-            pw = int(st.session_state.get("prework_count", 0))
-            hubo_pre = st.session_state.get("hubo_prework", "No")
-
-            pf = int(st.session_state.get("particip_facilitador", 0))
-            pv = int(st.session_state.get("particip_voluntaria", 0))
-            ek = int(st.session_state.get("estudiantes_clave", 0))
-            ea = int(st.session_state.get("estudiantes_apaticos", 0))
-
-            inc = st.session_state.get("incidente_problematico", "No")
-            inc_est = st.session_state.get("incidente_estudiante", "").strip()
-
-            errores = []
-            if a > 0:
-                if antes > a: errores.append("• 'Llegaron antes de 10 min' > 'Asistencia Total'")
-                if despues > a: errores.append("• 'Llegaron después de 10 min' > 'Asistencia Total'")
-                if (antes + despues) > a: errores.append("• 'Antes' + 'Después' > 'Asistencia Total'")
-                if hubo_pre == "Sí" and pw > a: errores.append("• 'Hicieron Pre-work' > 'Asistencia Total'")
-                if (pf + pv) > a: errores.append("• 'Participación (facilitador + voluntaria)' > 'Asistencia Total'")
-                if ek > a: errores.append("• 'Estudiantes clave' > 'Asistencia Total'")
-                if ea > a: errores.append("• 'Estudiantes apáticos' > 'Asistencia Total'")
-
-            if inc == "Sí" and inc_est == "":
-                errores.append("• Indicaron incidente, pero falta '¿Qué estudiante fue?'")
-
-            if errores:
-                st.error("No se puede guardar. Corrige lo siguiente:\n" + "\n".join(errores))
-                return
-
-            # Cálculo final del talk time
-            final_talk = st.session_state.talk_time_accumulated
-            if st.session_state.is_talking and st.session_state.talk_time_start_marker:
-                final_talk += (time.time() - st.session_state.talk_time_start_marker)
-
-            ctx = st.session_state.context
-
-            registro = {
-                "Manager": st.session_state.user_name,
-                "Fecha": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Trimestre": ctx.get("trimestre", ""),
-                "Curso": ctx.get("curso", ""),
-                "Facilitador": ctx.get("facilitador", ""),
-                "Grupo": ctx.get("grupo", ""),
-                "Sesion": ctx.get("sesion", ""),
-                "Talk_Time_Sec": int(final_talk),
-
-                "Inicio_Puntual": st.session_state.get("inicio_puntual", ""),
-                "Prework": st.session_state.get("hubo_prework", "No"),
-                "Prework_Count": int(pw) if st.session_state.get("hubo_prework", "No") == "Sí" else 0,
-
-                "Asistencia": int(a),
-                "Llegaron_Antes_10min": int(antes),
-                "Llegaron_Despues_10min": int(despues),
-
-                "Particip_Solicitud_Facilitador": int(pf),
-                "Particip_Voluntad_Propia": int(pv),
-                "Estudiantes_Clave": int(ek),
-                "Estudiantes_Apaticos": int(ea),
-
-                "Incidente_Problematico": inc,
-                "Incidente_Estudiante": inc_est if inc == "Sí" else "",
-
-                "Notas": notas,
-            }
-
-            save_observation_locally(registro)
-
-            with open("observaciones_consolidado.csv", "rb") as f:
-                st.download_button("📥 DESCARGAR CSV AHORA", f, "observaciones.csv", "text/csv")
-
-            st.success("¡Datos procesados! Descarga el archivo para terminar.")
-            st.query_params.clear()
-
-# --- CONTROLADOR ---
-if not st.session_state.logged_in:
-    login_screen()
-elif not st.session_state.monitoring_active:
-    context_screen()
-else:
-    monitoring_dashboard()
+            raise ValueError(f"No encontré columna de ID en uno de los archivos. Columnas: {d.columns.tolist()}")
+
+cla24[id_col] = normalize_id(cla24[id_col])
+cla25[id_col] = normalize_id(cla25[id_col])
+los[id_col]   = normalize_id(los[id_col])
+
+# -------------------------
+# 3) Detectar score total CLA+ por año
+# -------------------------
+y24 = pick_score_column(cla24)
+y25 = pick_score_column(cla25)
+cla24 = cla24[[id_col, y24]].rename(columns={y24: "cla_total_2024"})
+cla25 = cla25[[id_col, y25]].rename(columns={y25: "cla_total_2025"})
+
+# -------------------------
+# 4) Preparar LO's (formato wide)
+# -------------------------
+# Si tu LO viene en formato largo (matricula, lo, valor), aquí habría que pivotear.
+# Por ahora asumimos wide: columnas numéricas son LO's.
+exclude = {id_col, "ciclo", "curso", "trimestre", "year", "anio"}
+lo_cols = [c for c in los.columns
+           if c not in exclude and pd.api.types.is_numeric_dtype(los[c])]
+
+if len(lo_cols) == 0:
+    raise ValueError("No detecté columnas numéricas de LO en los.csv. Revisa el formato.")
+
+los_w = los[[id_col] + lo_cols].copy()
+
+# -------------------------
+# 5) Merge y deltas
+# -------------------------
+df = (cla24.merge(cla25, on=id_col, how="outer")
+           .merge(los_w, on=id_col, how="left"))
+
+df["cla_delta_24_25"] = df["cla_total_2025"] - df["cla_total_2024"]
+
+# -------------------------
+# 6) Correlaciones
+# -------------------------
+corr24 = corr_table(df, "cla_total_2024", lo_cols)
+corr25 = corr_table(df, "cla_total_2025", lo_cols)
+corrD  = corr_table(df, "cla_delta_24_25", lo_cols)
+
+# -------------------------
+# 7) LASSO: seleccionar LO's que predicen CLA+ (2025 y delta)
+# -------------------------
+def lasso_select(target_col):
+    sub = df[[target_col] + lo_cols].dropna()
+    if len(sub) < 30:
+        return pd.DataFrame(), "Muestra insuficiente para LASSO (se recomienda n>=30 con datos completos)."
+
+    X = sub[lo_cols].values
+    y = sub[target_col].values
+
+    # estandarización
+    Xs = StandardScaler().fit_transform(X)
+
+    cv = KFold(n_splits=5, shuffle=True, random_state=42)
+    model = LassoCV(cv=cv, random_state=42, n_alphas=100).fit(Xs, y)
+
+    coefs = pd.Series(model.coef_, index=lo_cols)
+    nonzero = coefs[coefs != 0].sort_values(key=lambda s: s.abs(), ascending=False)
+
+    out = nonzero.reset_index()
+    out.columns = ["LO", "coef"]
+    meta = f"alpha={model.alpha_:.6f} | n={len(sub)} | selected={len(nonzero)}"
+    return out, meta
+
+lasso25, meta25 = lasso_select("cla_total_2025")
+lassoD,  metaD  = lasso_select("cla_delta_24_25")
+
+# -------------------------
+# 8) Resumen ejecutivo (top LO's)
+# -------------------------
+def top_los(corr_df, k=10):
+    if corr_df.empty:
+        return []
+    return corr_df.head(k)[["LO","pearson_r","pearson_p","pearson_q_fdr","n"]].to_dict("records")
+
+summary = {
+    "N_total_ids": int(df[id_col].nunique()),
+    "N_with_CLA_2024": int(df["cla_total_2024"].notna().sum()),
+    "N_with_CLA_2025": int(df["cla_total_2025"].notna().sum()),
+    "N_with_LO": int(df[lo_cols].notna().any(axis=1).sum()),
+    "Top_LOs_CLA_2024": top_los(corr24, 10),
+    "Top_LOs_CLA_2025": top_los(corr25, 10),
+    "Top_LOs_Delta": top_los(corrD, 10),
+    "LASSO_meta_2025": meta25,
+    "LASSO_meta_delta": metaD
+}
+summary_df = pd.DataFrame([summary])
+
+# -------------------------
+# 9) Exportar a Excel
+# -------------------------
+out_name = "Resultados_CLA_2024_2025_vs_LOs.xlsx"
+with pd.ExcelWriter(out_name, engine="openpyxl") as writer:
+    summary_df.to_excel(writer, index=False, sheet_name="summary")
+    corr24.to_excel(writer, index=False, sheet_name="corr_CLA2024")
+    corr25.to_excel(writer, index=False, sheet_name="corr_CLA2025")
+    corrD.to_excel(writer, index=False, sheet_name="corr_Delta")
+    lasso25.to_excel(writer, index=False, sheet_name="lasso_CLA2025")
+    lassoD.to_excel(writer, index=False, sheet_name="lasso_Delta")
+
+print("Archivo generado:", out_name)
+files.download(out_name)
